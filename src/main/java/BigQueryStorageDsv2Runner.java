@@ -1,12 +1,12 @@
-import com.google.cloud.bigquery.connector.common.BigQueryConfig;
-import com.google.cloud.bigquery.connector.common.UserAgentProvider;
+import com.google.cloud.spark.bigquery.repackaged.com.google.cloud.bigquery.connector.common.BigQueryConfig;
+import com.google.cloud.spark.bigquery.repackaged.com.google.cloud.bigquery.connector.common.UserAgentProvider;
 import com.google.cloud.spark.bigquery.SparkBigQueryConfig;
 import com.google.cloud.spark.bigquery.v2.BigQueryDataSourceReader;
 import com.google.common.base.Stopwatch;
-import com.google.common.collect.ImmutableMap;
-import com.google.inject.AbstractModule;
-import com.google.inject.Guice;
-import com.google.inject.Injector;
+import com.google.cloud.spark.bigquery.repackaged.com.google.common.collect.ImmutableMap;
+import com.google.cloud.spark.bigquery.repackaged.com.google.inject.AbstractModule;
+import com.google.cloud.spark.bigquery.repackaged.com.google.inject.Guice;
+import com.google.cloud.spark.bigquery.repackaged.com.google.inject.Injector;
 import org.apache.commons.cli.*;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.sql.internal.SQLConf;
@@ -19,7 +19,12 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class BigQueryStorageDsv2Runner {
+    private static final Logger log =
+            LoggerFactory.getLogger(BigQueryStorageDsv2Runner.class);
 
     static Options getParseOptions() {
         Options parseOptions = new Options();
@@ -46,7 +51,13 @@ public class BigQueryStorageDsv2Runner {
                         .hasArg()
                         .type(Integer.class)
                         .build());
-
+        parseOptions.addOption(
+                Option.builder("r")
+                        .longOpt("serializeCreateSessionRequest")
+                        .desc("A base64 encoded binary serialized create read session request.")
+                        .hasArg()
+                        .type(String.class)
+                        .build());
         return parseOptions;
     }
 
@@ -59,25 +70,27 @@ public class BigQueryStorageDsv2Runner {
         String parentProject = commandLine.getOptionValue("parent");
 
         String streams = commandLine.getOptionValue("streams", "1");
+        String serializedRequest = commandLine.getOptionValue("serializeCreateSessionRequest", "");
 
-        System.out.println("Table: " + table);
-        System.out.println("Parent: " + parentProject);
-        System.out.println("Data format: " + commandLine.getOptionValue("format"));
+        log.info("Table: {}", table);
+        log.info("Parent: {}", parentProject);
         SparkBigQueryConfig config = SparkBigQueryConfig.from(
                 ImmutableMap.of("parallelism", streams,
                         "table", table),
 
-                ImmutableMap.of("parentProject", parentProject),
+                ImmutableMap.of("parentProject", parentProject,
+                  "bqEncodedCreateReadSessionRequest", serializedRequest),
                 new Configuration(),
                 /*defaultParallelism=*/Integer.parseInt(streams),
                 new SQLConf(), /*sparkVersion=*/"2.4.6", /*schema=*/Optional.empty());
 
-        Injector injector = Guice.createInjector(new com.google.cloud.bigquery.connector.common.BigQueryClientModule(),
+        Injector injector = Guice.createInjector(new com.google.cloud.spark.bigquery.repackaged.com.google.cloud.bigquery.connector.common.BigQueryClientModule(),
                 new com.google.cloud.spark.bigquery.v2.BigQueryDataSourceReaderModule(),
                 new AbstractModule() {
                     @Override
                     protected void configure() {
                         bind(BigQueryConfig.class).toInstance(config);
+                        bind(SparkBigQueryConfig.class).toInstance(config);
                         bind(UserAgentProvider.class).toInstance(() -> "sparkClientProfiler");
                     }
                 });
@@ -88,9 +101,9 @@ public class BigQueryStorageDsv2Runner {
         long elapsedMillis = stopwatch.elapsed(TimeUnit.MILLISECONDS);
 
         double displaySeconds = elapsedMillis / 1000.0;
-        System.out.println("Read session creation took " + displaySeconds + " seconds");
+        log.info("Read session creation took {} seconds ", displaySeconds);
 
-        System.out.printf("Creating a reader thread for %d streams ", partitions.size());
+        log.info("Creating a reader thread for {} streams ", partitions.size());
         List<ReaderThread> readerThreads = new ArrayList<>();
         int streamNumber = 0;
         for (InputPartition<ColumnarBatch> partition : partitions) {
@@ -102,12 +115,12 @@ public class BigQueryStorageDsv2Runner {
         for (ReaderThread readerThread : readerThreads) {
             readerThread.start();
         }
-        System.out.println("All reader threads started.");
+        log.info("All reader threads started.");
 
         for (ReaderThread readerThread : readerThreads) {
             readerThread.join();
         }
-        System.out.println("All reader threads finished; exiting");
+        log.info("All reader threads finished; exiting");
     }
 
     static class ReaderThread extends Thread {
@@ -128,7 +141,8 @@ public class BigQueryStorageDsv2Runner {
             try {
                 readRows();
             } catch (Exception e) {
-                System.err.println("Caught exception while calling ReadRows: " + e);
+                System.err.println("Caught exception while calling ReadRows: ");
+                e.printStackTrace();
             }
         }
 
@@ -145,7 +159,7 @@ public class BigQueryStorageDsv2Runner {
 
                 stopwatch.stop();
                 printPeriodicUpdate(stopwatch.elapsed(TimeUnit.MICROSECONDS));
-                System.out.println("Finished reading from stream: " + streamNumber);
+                log.info("Finished reading from stream: {}", streamNumber);
             } finally {
                 partitionReader.close();
             }
@@ -156,8 +170,8 @@ public class BigQueryStorageDsv2Runner {
                 return;
             }
 
-            System.out.printf(
-                    "%d: Received %d responses (%d rows) from stream in 10s",
+            log.info(
+                    "{}: Received {} responses ({} rows) from stream in 10s",
                     streamNumber, numResponses, numRows);
 
             numResponses = 0;
